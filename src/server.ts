@@ -2,7 +2,7 @@ import http from 'http';
 
 import { app } from './app';
 import { env } from './config/env';
-import { prisma } from './lib/prisma';
+import { connectStorage, disconnectStorage } from './storage';
 import { registerSocketServer } from './socket';
 
 const server = http.createServer(app);
@@ -11,7 +11,7 @@ registerSocketServer(server);
 
 const start = async (): Promise<void> => {
   try {
-    await prisma.$connect();
+    await connectStorage();
 
     server.listen(env.PORT, () => {
       console.log(`Server listening on http://localhost:${env.PORT}`);
@@ -25,7 +25,7 @@ const start = async (): Promise<void> => {
 void start();
 
 const shutdown = async (): Promise<void> => {
-  await prisma.$disconnect();
+  await disconnectStorage();
   server.close(() => {
     process.exit(0);
   });

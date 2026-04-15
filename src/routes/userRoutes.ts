@@ -1,7 +1,6 @@
 import { Router } from 'express';
 
-import { prisma } from '../lib/prisma';
-import { createUser } from '../services/chatService';
+import { createUser, getUser } from '../services/chatService';
 import { parseWithSchema } from '../utils/http';
 import { createUserSchema } from '../validators/userValidators';
 
@@ -20,9 +19,7 @@ userRouter.post('/', async (request, response, next) => {
 
 userRouter.get('/:userId', async (request, response, next) => {
   try {
-    const user = await prisma.user.findUnique({
-      where: { id: request.params.userId },
-    });
+    const user = await getUser(request.params.userId);
 
     if (!user) {
       response.status(404).json({ error: 'User not found.' });

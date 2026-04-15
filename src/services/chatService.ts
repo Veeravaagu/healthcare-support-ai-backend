@@ -1,21 +1,16 @@
-import { MessageRole, type Conversation, type Message, type Prisma, type User } from '@prisma/client';
-
-import { prisma } from '../lib/prisma';
 import type { ChatMessageInput, ChatPromptContext } from '../types/chat';
+import {
+  getStorageAdapter,
+  type StoredConversation,
+  type StoredMessage,
+  type StoredUser,
+} from '../storage';
 import { generateAssistantReply, updateMemorySummary } from './aiService';
 import { assessMessageSafety } from './safetyService';
 
-const conversationWithMessagesInclude = {
-  messages: {
-    orderBy: {
-      createdAt: 'asc',
-    },
-  },
-} satisfies Prisma.ConversationInclude;
-
-type ConversationWithMessages = Prisma.ConversationGetPayload<{
-  include: typeof conversationWithMessagesInclude;
-}>;
+export type ConversationWithMessages = StoredConversation & {
+  messages: StoredMessage[];
+};
 
 export type SendChatMessageInput = {
   userId: string;
@@ -25,16 +20,20 @@ export type SendChatMessageInput = {
 
 export type SendChatMessageResult = {
   conversation: ConversationWithMessages;
-  userMessage: Message;
-  assistantMessage: Message;
+  userMessage: StoredMessage;
+  assistantMessage: StoredMessage;
   memorySummary: string;
 };
 
 const RECENT_MESSAGE_LIMIT = 12;
 
-const toChatMessage = (message: Message): ChatMessageInput => {
+const storage = (): ReturnType<typeof getStorageAdapter> => {
+  return getStorageAdapter();
+};
+
+const toChatMessage = (message: StoredMessage): ChatMessageInput => {
   return {
-    role: message.role === MessageRole.USER ? 'user' : 'assistant',
+    role: message.role,
     content: message.content,
   };
 };
@@ -62,30 +61,43 @@ const defaultConversationTitle = (content: string): string => {
   return content.trim().slice(0, 50) || 'New conversation';
 };
 
+const getConversationWithMessagesOrNull = async (
+  conversationId: string,
+): Promise<ConversationWithMessages | null> => {
+  const conversation = await storage().getConversation(conversationId);
+
+  if (!conversation) {
+    return null;
+  }
+
+  const messages = await storage().getMessages(conversationId);
+
+  return {
+    ...conversation,
+    messages,
+  };
+};
+
 const ensureConversationForUser = async (
-  user: User,
+  user: StoredUser,
   conversationId: string | undefined,
   firstMessage: string,
 ): Promise<ConversationWithMessages> => {
   if (!conversationId) {
-    return prisma.conversation.create({
-      data: {
-        userId: user.id,
-        title: defaultConversationTitle(firstMessage),
-      },
-      include: conversationWithMessagesInclude,
+    const conversation = await storage().createConversation({
+      userId: user.id,
+      title: defaultConversationTitle(firstMessage),
     });
+
+    return {
+      ...conversation,
+      messages: [],
+    };
   }
 
-  const conversation = await prisma.conversation.findFirst({
-    where: {
-      id: conversationId,
-      userId: user.id,
-    },
-    include: conversationWithMessagesInclude,
-  });
+  const conversation = await getConversationWithMessagesOrNull(conversationId);
 
-  if (!conversation) {
+  if (!conversation || conversation.userId !== user.id) {
     throw new Error('Conversation not found for user.');
   }
 
@@ -93,10 +105,7 @@ const ensureConversationForUser = async (
 };
 
 const getConversationOrThrow = async (conversationId: string): Promise<ConversationWithMessages> => {
-  const conversation = await prisma.conversation.findUnique({
-    where: { id: conversationId },
-    include: conversationWithMessagesInclude,
-  });
+  const conversation = await getConversationWithMessagesOrNull(conversationId);
 
   if (!conversation) {
     throw new Error('Conversation not found.');
@@ -105,46 +114,44 @@ const getConversationOrThrow = async (conversationId: string): Promise<Conversat
   return conversation;
 };
 
-export const createUser = async (input: { name: string; email?: string }): Promise<User> => {
-  return prisma.user.create({
-    data: input,
-  });
+export const createUser = async (input: { name: string; email?: string }): Promise<StoredUser> => {
+  return storage().createUser(input);
 };
 
 export const createConversation = async (input: {
   userId: string;
   title?: string;
-}): Promise<Conversation> => {
-  return prisma.conversation.create({
-    data: {
-      userId: input.userId,
-      title: input.title?.trim() || 'New conversation',
-    },
+}): Promise<StoredConversation> => {
+  const user = await storage().getUser(input.userId);
+
+  if (!user) {
+    throw new Error('User not found.');
+  }
+
+  return storage().createConversation({
+    userId: input.userId,
+    title: input.title?.trim() || 'New conversation',
   });
 };
 
-export const listUserConversations = async (userId: string): Promise<Conversation[]> => {
-  return prisma.conversation.findMany({
-    where: { userId },
-    orderBy: { updatedAt: 'desc' },
-  });
+export const getUser = async (userId: string): Promise<StoredUser | null> => {
+  return storage().getUser(userId);
+};
+
+export const listUserConversations = async (userId: string): Promise<StoredConversation[]> => {
+  return storage().listUserConversations(userId);
 };
 
 export const getConversationWithMessages = async (
   conversationId: string,
 ): Promise<ConversationWithMessages | null> => {
-  return prisma.conversation.findUnique({
-    where: { id: conversationId },
-    include: conversationWithMessagesInclude,
-  });
+  return getConversationWithMessagesOrNull(conversationId);
 };
 
 export const sendChatMessage = async (
   input: SendChatMessageInput,
 ): Promise<SendChatMessageResult> => {
-  const user = await prisma.user.findUnique({
-    where: { id: input.userId },
-  });
+  const user = await storage().getUser(input.userId);
 
   if (!user) {
     throw new Error('User not found.');
@@ -152,12 +159,10 @@ export const sendChatMessage = async (
 
   const conversation = await ensureConversationForUser(user, input.conversationId, input.content);
 
-  const userMessage = await prisma.message.create({
-    data: {
-      conversationId: conversation.id,
-      role: MessageRole.USER,
-      content: input.content,
-    },
+  const userMessage = await storage().saveMessage({
+    conversationId: conversation.id,
+    role: 'user',
+    content: input.content,
   });
 
   const conversationAfterUserMessage = await getConversationOrThrow(conversation.id);
@@ -165,12 +170,10 @@ export const sendChatMessage = async (
     buildPromptContext(user.memorySummary, conversationAfterUserMessage, input.content),
   );
 
-  const assistantMessage = await prisma.message.create({
-    data: {
-      conversationId: conversationAfterUserMessage.id,
-      role: MessageRole.ASSISTANT,
-      content: assistantReply,
-    },
+  const assistantMessage = await storage().saveMessage({
+    conversationId: conversationAfterUserMessage.id,
+    role: 'assistant',
+    content: assistantReply,
   });
 
   const conversationWithAssistant = await getConversationOrThrow(conversation.id);
@@ -180,10 +183,7 @@ export const sendChatMessage = async (
     buildRecentMessages(conversationWithAssistant),
   );
 
-  await prisma.user.update({
-    where: { id: user.id },
-    data: { memorySummary },
-  });
+  await storage().updateMemorySummary(user.id, memorySummary);
 
   return {
     conversation: conversationWithAssistant,

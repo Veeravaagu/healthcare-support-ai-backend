@@ -26,7 +26,7 @@ A lightweight memory layer helps the assistant avoid starting from zero every se
 
 - REST API for users, conversations, and chat
 - Socket.IO support for real-time chat
-- Prisma + SQLite persistence for users, conversations, and messages
+- swappable storage adapters for Prisma + SQLite or Mongoose + MongoDB
 - per-user `memorySummary` used in assistant prompts
 - memory summary refreshed after each completed chat turn
 - lightweight safety-aware response layer for higher-risk messages
@@ -38,7 +38,9 @@ The system is intentionally small and service-oriented:
 
 - Express handles HTTP routing
 - Socket.IO handles real-time chat events
-- Prisma manages persistence through a simple relational schema
+- a storage adapter layer keeps REST and socket flows independent from database details
+- Prisma manages the SQLite backend
+- Mongoose manages the MongoDB backend
 - `chatService` owns the main interaction flow
 - `aiService` builds prompts, generates replies, and updates memory summaries
 - `safetyService` performs a conservative keyword-based safety check on the latest user message
@@ -53,6 +55,8 @@ Both REST and WebSocket chat paths reuse the same chat service so behavior stays
 - Socket.IO
 - Prisma
 - SQLite
+- Mongoose
+- MongoDB
 - Zod
 - OpenAI API
 - Vitest
@@ -160,7 +164,7 @@ cp .env.example .env
 npm run prisma:generate
 ```
 
-4. Initialize the database:
+4. Initialize the SQLite database when using `STORAGE_BACKEND=sqlite`:
 
 ```bash
 npm run prisma:push
@@ -188,7 +192,9 @@ npm test
 
 ```env
 PORT=3000
+STORAGE_BACKEND=sqlite
 DATABASE_URL="file:./dev.db"
+MONGODB_URL="mongodb://127.0.0.1:27017/healthcare-support-ai"
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4.1-mini
 ```
@@ -196,7 +202,72 @@ OPENAI_MODEL=gpt-4.1-mini
 Notes:
 
 - if `OPENAI_API_KEY` is not set, the app still runs using deterministic fallback behavior for replies and memory updates
-- SQLite is used for simplicity and local portability
+- `STORAGE_BACKEND=sqlite` is the default
+
+## Switching Storage Backends
+
+Set `STORAGE_BACKEND` in `.env`:
+
+```env
+STORAGE_BACKEND=sqlite
+DATABASE_URL="file:./dev.db"
+```
+
+or:
+
+```env
+STORAGE_BACKEND=mongodb
+MONGODB_URL="mongodb://127.0.0.1:27017/healthcare-support-ai"
+```
+
+The API routes and Socket.IO events do not change between backends. The adapter layer keeps the REST and WebSocket flows identical while swapping persistence behind the scenes.
+
+## MongoDB Setup
+
+### Local MongoDB
+
+1. Install MongoDB Community Edition.
+2. Start MongoDB locally.
+3. Set:
+
+```env
+STORAGE_BACKEND=mongodb
+MONGODB_URL="mongodb://127.0.0.1:27017/healthcare-support-ai"
+```
+
+4. Start the app:
+
+```bash
+npm run dev
+```
+
+### Docker-based MongoDB
+
+If you already use Docker locally, you can run MongoDB without changing this repo:
+
+```bash
+docker run --name healthcare-support-mongo \
+  -p 27017:27017 \
+  -e MONGO_INITDB_DATABASE=healthcare-support-ai \
+  -d mongo:7
+```
+
+Then use:
+
+```env
+STORAGE_BACKEND=mongodb
+MONGODB_URL="mongodb://127.0.0.1:27017/healthcare-support-ai"
+```
+
+## Testing
+
+`npm test` runs:
+
+- the existing service and safety tests
+- an 8-test PrismaAdapter suite against SQLite
+- an 8-test MongooseAdapter suite against `mongodb-memory-server`
+
+The MongoDB adapter tests use an in-memory Mongo instance for local zero-dependency execution.
 
 ## Limitations and Disclaimer
 
